@@ -7,6 +7,8 @@ from ingest import load_zip_documents
 from chunk import Chunk, chunk_documents
 from embed import Embedder
 
+# 原始数据和 indexing 结果的存储路径
+RAW_DATA_DIR = ...
 RAW_DATA_DIR = Path("data/raw")
 PROCESSED_DATA_DIR = Path("data/processed")
 
@@ -14,6 +16,7 @@ INDEX_PATH = PROCESSED_DATA_DIR / "faiss.index"
 CHUNKS_PATH = PROCESSED_DATA_DIR / "chunks.pkl"
 
 
+# 加载三个数据源并合并成统一的 Document 列表
 def load_all_documents():
     google_drive_docs = load_zip_documents(
         RAW_DATA_DIR / "google_drive_slice_0001.zip",
@@ -33,6 +36,7 @@ def load_all_documents():
     return google_drive_docs + jira_docs + slack_docs
 
 
+# 将 chunks 转成 normalized embeddings，并建立 FAISS 向量索引
 def build_index(
     chunks: list[Chunk],
     embedder: Embedder,
@@ -47,6 +51,7 @@ def build_index(
     return index
 
 
+# 保存向量索引和对应 chunks，供 retrieval 阶段加载
 def save_index(index, chunks: list[Chunk]):
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -56,6 +61,7 @@ def save_index(index, chunks: list[Chunk]):
         pickle.dump(chunks, file)
 
 
+# 构建完整 indexing pipeline
 def main():
     print("Loading documents...")
     documents = load_all_documents()

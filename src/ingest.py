@@ -3,12 +3,15 @@ from pathlib import Path
 from zipfile import ZipFile
 
 
+# 统一文档数据结构，让下游模块可以用相同格式处理不同来源的数据
 @dataclass
 class Document:
     text: str
     metadata: dict
 
 
+# 从zip 中读取txt文件，并统一转化为Document对象
+# read出来的是二进制bytes, 需要decode成为python string来进行后续文本处理
 def load_zip_documents(zip_path: Path, source_type: str) -> list[Document]:
     documents = []
 
@@ -21,7 +24,7 @@ def load_zip_documents(zip_path: Path, source_type: str) -> list[Document]:
 
             if not text:
                 continue
-
+            # 保留原始来源信息，方便后续retrieval
             document = Document(
                 text=text,
                 metadata={
@@ -29,12 +32,12 @@ def load_zip_documents(zip_path: Path, source_type: str) -> list[Document]:
                     "source_file": file_name,
                 },
             )
-
             documents.append(document)
 
     return documents
 
 
+# sanity check，确认3个数据源都能正常读取，并统计文件数量
 if __name__ == "__main__":
     google_drive_docs = load_zip_documents(
         Path("data/raw/google_drive_slice_0001.zip"),
