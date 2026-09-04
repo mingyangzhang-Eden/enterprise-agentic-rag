@@ -48,6 +48,8 @@ say that you do not have enough information.
 
 Do not invent facts.
 
+Answer in English unless the user explicitly requests another language.
+
 Context:
 {context}
 

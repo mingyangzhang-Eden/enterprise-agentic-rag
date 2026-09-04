@@ -8,6 +8,9 @@ CHUNK_SEARCH_K = 500
 DOCUMENT_TOP_K = 100
 NUM_REWRITES = 2
 
+RRF_K = 60
+RERANK_CANDIDATE_K = 200
+
 
 class CandidateGenerator:
     def __init__(self):
@@ -46,6 +49,9 @@ class CandidateGenerator:
         Retrieve many chunks and keep
         the first chunk from each unique
         document.
+
+        This method is used by the existing
+        document-level candidate evaluation.
 
         Returns:
             [
@@ -132,14 +138,18 @@ class CandidateGenerator:
         question_type=None,
     ):
         """
-        Build a high-recall candidate pool.
+        Build the existing document-level
+        high-recall candidate pool.
+
+        This method is kept for candidate
+        coverage evaluation.
 
         Each query variant goes through:
             Dense
             BM25
 
-        All retrieved documents are then
-        unioned and deduplicated.
+        Retrieved documents are unioned
+        and deduplicated by document ID.
         """
 
         queries = self.build_queries(
@@ -168,6 +178,113 @@ class CandidateGenerator:
 
         return list(candidate_map.values())
 
+    def get_chunk_key(
+        self,
+        chunk,
+    ):
+        """
+        Build a stable key for chunk-level
+        deduplication.
+
+        source_file identifies the source
+        document, while chunk text distinguishes
+        different chunks from the same document.
+        """
+
+        source_file = chunk.metadata.get(
+            "source_file",
+            "",
+        )
+
+        return (
+            source_file,
+            chunk.text,
+        )
+
+    def generate_chunk_candidates(
+        self,
+        query,
+        question_type=None,
+        top_k=RERANK_CANDIDATE_K,
+    ):
+        """
+        Build a chunk-level candidate pool
+        for Cross-Encoder reranking.
+
+        Steps:
+            1. Build original / rewritten queries.
+            2. Retrieve chunks with Dense and BM25.
+            3. Fuse all ranked lists using RRF.
+            4. Deduplicate identical chunks.
+            5. Return the top chunk candidates.
+
+        Unlike generate(), this method does NOT
+        deduplicate by document ID. Multiple chunks
+        from the same document may be preserved.
+        """
+
+        queries = self.build_queries(
+            query,
+            question_type,
+        )
+
+        chunk_map = {}
+
+        for retrieval_query in queries:
+            dense_results = self.dense_retriever.retrieve(
+                retrieval_query,
+                top_k=CHUNK_SEARCH_K,
+            )
+
+            bm25_results = self.bm25_retriever.retrieve(
+                retrieval_query,
+                top_k=CHUNK_SEARCH_K,
+            )
+
+            ranked_lists = [
+                dense_results,
+                bm25_results,
+            ]
+
+            for results in ranked_lists:
+                for rank, (chunk, _) in enumerate(
+                    results,
+                    start=1,
+                ):
+                    source_file = chunk.metadata.get(
+                        "source_file",
+                        "",
+                    )
+
+                    doc_id = self.extract_doc_id(
+                        source_file,
+                    )
+
+                    if doc_id is None:
+                        continue
+
+                    chunk_key = self.get_chunk_key(
+                        chunk,
+                    )
+
+                    if chunk_key not in chunk_map:
+                        chunk_map[chunk_key] = {
+                            "doc_id": doc_id,
+                            "chunk": chunk,
+                            "rrf_score": 0.0,
+                        }
+
+                    chunk_map[chunk_key]["rrf_score"] += 1.0 / (RRF_K + rank)
+
+        candidates = list(chunk_map.values())
+
+        candidates.sort(
+            key=lambda item: item["rrf_score"],
+            reverse=True,
+        )
+
+        return candidates[:top_k]
+
 
 def main():
     generator = CandidateGenerator()
@@ -180,17 +297,42 @@ def main():
         "before everything is archived?"
     )
 
-    candidates = generator.generate(
+    print("\n" + "=" * 80)
+    print("DOCUMENT-LEVEL CANDIDATES")
+    print("=" * 80)
+
+    document_candidates = generator.generate(
         query=test_query,
         question_type="semantic",
     )
 
-    print(f"\nCandidate Pool Size: " f"{len(candidates)}")
+    print(f"Document Candidate Pool Size: " f"{len(document_candidates)}")
 
-    print("\nFirst 5 Candidate IDs:")
+    print("\nFirst 5 Document Candidates:")
 
-    for candidate in candidates[:5]:
+    for candidate in document_candidates[:5]:
         print(candidate["doc_id"])
+
+    print("\n" + "=" * 80)
+    print("CHUNK-LEVEL CANDIDATES FOR RERANKING")
+    print("=" * 80)
+
+    chunk_candidates = generator.generate_chunk_candidates(
+        query=test_query,
+        question_type="semantic",
+        top_k=20,
+    )
+
+    print(f"Chunk Candidate Pool Size: " f"{len(chunk_candidates)}")
+
+    print("\nFirst 5 Chunk Candidates:")
+
+    for candidate in chunk_candidates[:5]:
+        print(f"Doc: {candidate['doc_id']} | " f"RRF: {candidate['rrf_score']:.6f}")
+
+        print(candidate["chunk"].text[:200].replace("\n", " "))
+
+        print()
 
 
 if __name__ == "__main__":

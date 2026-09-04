@@ -225,3 +225,7 @@ data/raw/
 
 # Generated indexing artifacts
 data/processed/
+# Advanced RAG experiment outputs
+data/evaluation/advanced_rag_answers*.jsonl
+data/evaluation/advanced_rag_eval_results*.jsonl
+data/evaluation/query_rewrite_cache.json
