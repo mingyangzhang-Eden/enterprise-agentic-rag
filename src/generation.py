@@ -1,21 +1,25 @@
 import os
+import time
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from retrieval import Retriever
 
-# cong .env 加载API信息
 load_dotenv()
 
 
-# 调用ARK LLM，根据retrieved context 做inference
+GENERATION_TIMEOUT_SECONDS = 180
+MAX_GENERATION_ATTEMPTS = 3
+RETRY_WAIT_SECONDS = 5
+
+
 class Generator:
     def __init__(self):
         api_key = os.getenv("ARK_API_KEY")
         base_url = os.getenv("ARK_BASE_URL")
         endpoint_id = os.getenv("ARK_LLM_ENDPOINT_ID")
-        # 检查必要LLM 配置
+
         if not api_key:
             raise ValueError("ARK_API_KEY is not set")
 
@@ -30,14 +34,23 @@ class Generator:
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
+            # Prevent one request from
+            # hanging forever.
+            timeout=GENERATION_TIMEOUT_SECONDS,
+            # Retry behavior is handled
+            # explicitly below.
+            max_retries=0,
         )
 
-    def generate(
+    def generate_once(
         self,
         query: str,
         context: str,
     ) -> str:
-        # 让LLM 基于检索到的context回答，减少幻觉
+        """
+        Perform one LLM generation request.
+        """
+
         prompt = f"""
 You are an enterprise knowledge assistant.
 
@@ -47,8 +60,7 @@ If the context does not contain enough information to answer the question,
 say that you do not have enough information.
 
 Do not invent facts.
-
-Answer in English unless the user explicitly requests another language.
+Answer in English.
 
 Context:
 {context}
@@ -64,14 +76,86 @@ Question:
 
         return response.output_text
 
+    def generate(
+        self,
+        query: str,
+        context: str,
+    ) -> str:
+        """
+        Generate an answer with explicit
+        timeout-aware retry handling.
+        """
 
-# 将 Top-K retrieval results 组织成 LLM 可以使用的 context
+        last_error = None
+
+        for attempt in range(
+            1,
+            MAX_GENERATION_ATTEMPTS + 1,
+        ):
+            print(f"Generation attempt " f"{attempt}/" f"{MAX_GENERATION_ATTEMPTS}...")
+
+            start_time = time.time()
+
+            try:
+                answer = self.generate_once(
+                    query=query,
+                    context=context,
+                )
+
+                elapsed = time.time() - start_time
+
+                print(f"Generation completed " f"in {elapsed:.2f}s.")
+
+                return answer
+
+            except Exception as error:
+                elapsed = time.time() - start_time
+
+                last_error = error
+
+                print(
+                    f"Generation attempt " f"{attempt} failed " f"after {elapsed:.2f}s."
+                )
+
+                print(f"Error: " f"{type(error).__name__}: " f"{error}")
+
+                if attempt < MAX_GENERATION_ATTEMPTS:
+                    print(f"Retrying in " f"{RETRY_WAIT_SECONDS}s...")
+
+                    time.sleep(RETRY_WAIT_SECONDS)
+
+        raise RuntimeError(
+            "Generation failed after "
+            f"{MAX_GENERATION_ATTEMPTS} "
+            f"attempts. "
+            f"Last error: {last_error}"
+        )
+
+
 def build_context(results) -> str:
+    """
+    Build context for the original
+    V0 Basic RAG pipeline.
+    """
+
     context_parts = []
 
-    for rank, (chunk, score) in enumerate(results, start=1):
-        source_type = chunk.metadata.get("source_type", "unknown")
-        source_file = chunk.metadata.get("source_file", "unknown")
+    for rank, (
+        chunk,
+        score,
+    ) in enumerate(
+        results,
+        start=1,
+    ):
+        source_type = chunk.metadata.get(
+            "source_type",
+            "unknown",
+        )
+
+        source_file = chunk.metadata.get(
+            "source_file",
+            "unknown",
+        )
 
         context_part = f"""
 [Source {rank}]
@@ -87,20 +171,26 @@ Similarity score: {score:.4f}
     return "\n".join(context_parts)
 
 
-# 串联 RAG pipeline：retrieval → context construction → generation
 def main():
+    """
+    Original V0 Basic RAG CLI.
+    """
+
     retriever = Retriever()
+
     generator = Generator()
 
     query = input("Enter your question: ")
 
     print("\nRetrieving relevant context...")
+
     results = retriever.retrieve(
         query,
         top_k=5,
     )
 
     print("Generating answer...")
+
     context = build_context(results)
 
     answer = generator.generate(
@@ -109,11 +199,18 @@ def main():
     )
 
     print("\nAnswer:")
+
     print(answer)
 
     print("\nSources:")
 
-    for rank, (chunk, score) in enumerate(results, start=1):
+    for rank, (
+        chunk,
+        score,
+    ) in enumerate(
+        results,
+        start=1,
+    ):
         print(
             f"{rank}. "
             f"{chunk.metadata.get('source_type')} | "

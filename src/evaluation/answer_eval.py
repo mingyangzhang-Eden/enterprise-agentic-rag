@@ -5,147 +5,99 @@ import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
-EVIDENCE_K_VALUES = [5, 10, 20]
+load_dotenv()
 
-# Maximum time allowed for one Judge API request.
-JUDGE_TIMEOUT_SECONDS = 90
 
-# Retry the same question if the Judge request fails.
+INPUT_FILE = "data/evaluation/" "advanced_rag_answers_full.jsonl"
+
+OUTPUT_FILE = "data/evaluation/" "advanced_rag_eval_results_full.jsonl"
+
+JUDGE_TIMEOUT_SECONDS = 180
 MAX_JUDGE_ATTEMPTS = 3
-
-# Wait before retrying.
 RETRY_WAIT_SECONDS = 5
 
 
 class AnswerEvaluator:
     def __init__(self):
-        load_dotenv()
-
         api_key = os.getenv("ARK_API_KEY")
         base_url = os.getenv("ARK_BASE_URL")
         endpoint_id = os.getenv("ARK_LLM_ENDPOINT_ID")
 
         if not api_key:
-            raise ValueError("ARK_API_KEY is missing.")
+            raise ValueError("ARK_API_KEY is not set")
 
         if not base_url:
-            raise ValueError("ARK_BASE_URL is missing.")
+            raise ValueError("ARK_BASE_URL is not set")
 
         if not endpoint_id:
-            raise ValueError("ARK_LLM_ENDPOINT_ID is missing.")
+            raise ValueError("ARK_LLM_ENDPOINT_ID is not set")
 
         self.endpoint_id = endpoint_id
 
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
-            # Do not let one API request hang forever.
             timeout=JUDGE_TIMEOUT_SECONDS,
-            # We handle retries ourselves so that
-            # the behavior is visible and controllable.
             max_retries=0,
         )
-
-    def document_metrics(
-        self,
-        document_ids,
-        expected_doc_ids,
-    ):
-        """
-        Compute deterministic
-        document-level metrics.
-        """
-
-        retrieved_set = set(document_ids)
-
-        expected_set = set(expected_doc_ids)
-
-        if expected_set:
-            document_recall = len(retrieved_set & expected_set) / len(expected_set)
-        else:
-            document_recall = 0.0
-
-        invalid_extra_documents = [
-            doc_id for doc_id in document_ids if doc_id not in expected_set
-        ]
-
-        return {
-            "document_recall": (document_recall),
-            "invalid_extra_documents": (invalid_extra_documents),
-            "invalid_extra_count": len(invalid_extra_documents),
-        }
 
     def judge_answer_once(
         self,
         question,
-        answer,
+        system_answer,
         gold_answer,
         answer_facts,
     ):
-        """
-        Perform one LLM Judge request.
-        """
-
-        facts_text = "\n".join(
-            f"{index}. {fact}"
-            for index, fact in enumerate(
-                answer_facts,
-                start=1,
-            )
-        )
-
         prompt = f"""
-You are evaluating the answer produced by
-an enterprise RAG system.
+You are evaluating the answer produced by an enterprise RAG system.
 
-Evaluate the answer strictly against the
-reference answer and reference facts.
-
-Do not reward unsupported extra claims.
+Evaluate the system answer using the reference answer and reference facts.
 
 Question:
 {question}
 
-Reference answer:
+System Answer:
+{system_answer}
+
+Reference Answer:
 {gold_answer}
 
-Reference facts:
-{facts_text}
+Reference Facts:
+{json.dumps(answer_facts, ensure_ascii=False, indent=2)}
 
-System answer:
-{answer}
+Evaluate two things.
 
-Evaluate two things:
+1. Correctness
 
-1. correctness_score
-A number from 0.0 to 1.0 representing the
-overall factual correctness of the system answer.
+Give a correctness score from 0.0 to 1.0.
 
-2. fact_results
-For every reference fact, determine whether
-the system answer clearly contains that fact.
+The score should reflect whether the claims made in the system answer are
+factually consistent with the reference answer and reference facts.
 
-Return only valid JSON in exactly this format:
+A score of 1.0 means the answer is fully correct and contains no meaningful
+unsupported or contradictory claims.
+
+A score of 0.0 means the answer is fundamentally incorrect.
+
+2. Fact coverage
+
+For every reference fact, determine whether that fact is covered by the
+system answer.
+
+Return JSON only.
+
+Use exactly this structure:
 
 {{
   "correctness_score": 0.0,
-  "fact_results": [
+  "fact_coverage": [
     {{
       "fact": "reference fact",
       "covered": true
     }}
   ],
-  "reason": "short explanation"
+  "reasoning": "brief explanation of the evaluation"
 }}
-
-Rules:
-- A fact can be covered using different wording.
-- Do not require exact string matching.
-- Do not count a fact as covered if it is only
-  implied vaguely.
-- Unsupported or contradictory claims should
-  reduce correctness.
-- Be strict and consistent.
 """
 
         response = self.client.responses.create(
@@ -155,26 +107,29 @@ Rules:
 
         output_text = response.output_text.strip()
 
-        try:
-            result = json.loads(output_text)
+        if output_text.startswith("```"):
+            lines = output_text.splitlines()
 
-        except json.JSONDecodeError:
-            raise ValueError("Judge returned invalid JSON:\n" + output_text)
+            if lines:
+                lines = lines[1:]
 
-        return result
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+
+            output_text = "\n".join(lines).strip()
+
+            if output_text.startswith("json"):
+                output_text = output_text[4:].strip()
+
+        return json.loads(output_text)
 
     def judge_answer(
         self,
         question,
-        answer,
+        system_answer,
         gold_answer,
         answer_facts,
     ):
-        """
-        Run the LLM Judge with explicit
-        timeout-aware retry handling.
-        """
-
         last_error = None
 
         for attempt in range(
@@ -188,8 +143,8 @@ Rules:
             try:
                 result = self.judge_answer_once(
                     question=question,
-                    answer=answer,
-                    gold_answer=(gold_answer),
+                    system_answer=(system_answer),
+                    gold_answer=gold_answer,
                     answer_facts=(answer_facts),
                 )
 
@@ -215,16 +170,14 @@ Rules:
 
         raise RuntimeError(
             "Judge failed after "
-            f"{MAX_JUDGE_ATTEMPTS} attempts. "
+            f"{MAX_JUDGE_ATTEMPTS} "
+            f"attempts. "
             f"Last error: {last_error}"
         )
 
 
-def load_results(file_path):
-    results = []
-
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Input file not found: " f"{file_path}")
+def load_jsonl(file_path):
+    records = []
 
     with open(
         file_path,
@@ -237,19 +190,21 @@ def load_results(file_path):
             if not line:
                 continue
 
-            results.append(json.loads(line))
+            records.append(json.loads(line))
 
-    return results
+    return records
 
 
-def load_completed_ids(file_path):
+def load_completed_question_ids(
+    output_file,
+):
     completed_ids = set()
 
-    if not os.path.exists(file_path):
+    if not os.path.exists(output_file):
         return completed_ids
 
     with open(
-        file_path,
+        output_file,
         "r",
         encoding="utf-8",
     ) as f:
@@ -273,20 +228,65 @@ def load_completed_ids(file_path):
     return completed_ids
 
 
+def calculate_document_metrics(
+    retrieved_doc_ids,
+    expected_doc_ids,
+):
+    retrieved_set = set(retrieved_doc_ids)
+
+    expected_set = set(expected_doc_ids)
+
+    if expected_set:
+        document_recall = len(retrieved_set & expected_set) / len(expected_set)
+
+    else:
+        document_recall = 1.0
+
+    extra_documents = [
+        doc_id for doc_id in retrieved_doc_ids if doc_id not in expected_set
+    ]
+
+    return (
+        document_recall,
+        extra_documents,
+    )
+
+
+def calculate_completeness(
+    answer_facts,
+    fact_coverage,
+):
+    if not answer_facts:
+        return 1.0
+
+    covered_count = 0
+
+    for item in fact_coverage:
+        if item.get(
+            "covered",
+            False,
+        ):
+            covered_count += 1
+
+    completeness = covered_count / len(answer_facts)
+
+    return completeness
+
+
 def save_result(
-    file_path,
+    output_file,
     result,
 ):
-    directory = os.path.dirname(file_path)
+    output_directory = os.path.dirname(output_file)
 
-    if directory:
+    if output_directory:
         os.makedirs(
-            directory,
+            output_directory,
             exist_ok=True,
         )
 
     with open(
-        file_path,
+        output_file,
         "a",
         encoding="utf-8",
     ) as f:
@@ -298,96 +298,213 @@ def save_result(
             + "\n"
         )
 
-        # Force buffered data to disk immediately.
         f.flush()
 
 
-def calculate_completeness(
-    fact_results,
-):
-    if not fact_results:
-        return 0.0
+def print_summary(results):
+    if not results:
+        print("No completed evaluation " "results.")
+        return
 
-    covered_count = sum(
-        1
-        for fact_result in fact_results
-        if fact_result.get(
-            "covered",
-            False,
-        )
-    )
+    correctness_scores = [item["correctness_score"] for item in results]
 
-    return covered_count / len(fact_results)
+    completeness_scores = [item["completeness"] for item in results]
+
+    document_recalls = [item["document_recall"] for item in results]
+
+    extra_document_counts = [len(item["invalid_extra_documents"]) for item in results]
+
+    avg_correctness = sum(correctness_scores) / len(correctness_scores)
+
+    avg_completeness = sum(completeness_scores) / len(completeness_scores)
+
+    avg_document_recall = sum(document_recalls) / len(document_recalls)
+
+    avg_extra_documents = sum(extra_document_counts) / len(extra_document_counts)
+
+    print("\n" + "=" * 80)
+
+    print("FULL ADVANCED RAG " "EVALUATION SUMMARY")
+
+    print("=" * 80)
+
+    print(f"Questions evaluated: " f"{len(results)}")
+
+    print(f"Average Correctness: " f"{avg_correctness:.4f}")
+
+    print(f"Average Completeness: " f"{avg_completeness:.4f}")
+
+    print(f"Average Document Recall: " f"{avg_document_recall:.4f}")
+
+    print(f"Average Extra Documents: " f"{avg_extra_documents:.2f}")
 
 
-def evaluate_one_k(
-    evaluator,
-    evidence_k,
-):
-    input_file = "data/evaluation/" f"advanced_rag_answers_k" f"{evidence_k}.jsonl"
+def main():
+    print("Loading generated RAG answers...")
 
-    output_file = (
-        "data/evaluation/" f"advanced_rag_eval_results_k" f"{evidence_k}.jsonl"
-    )
+    answers = load_jsonl(INPUT_FILE)
 
-    print("\n" + "#" * 80)
+    print(f"Loaded {len(answers)} " f"answers.")
 
-    print(f"EVALUATING EVIDENCE-K = " f"{evidence_k}")
+    if len(answers) != 59:
+        print("WARNING: Expected 59 " "answers.")
 
-    print("#" * 80)
-
-    results = load_results(input_file)
-
-    completed_ids = load_completed_ids(output_file)
-
-    print(f"Loaded answers: " f"{len(results)}")
+    completed_ids = load_completed_question_ids(OUTPUT_FILE)
 
     print(f"Already evaluated: " f"{len(completed_ids)}")
 
+    print(f"Remaining: " f"{len(answers) - len(completed_ids)}")
+
+    print(f"Output file: " f"{OUTPUT_FILE}")
+
+    evaluator = AnswerEvaluator()
+
+    failed_count = 0
+
+    total_answers = len(answers)
+
     for index, item in enumerate(
-        results,
+        answers,
         start=1,
     ):
         question_id = item["question_id"]
 
         if question_id in completed_ids:
             print(
-                f"\n[{index}/{len(results)}] "
+                f"\n[{index}/{total_answers}] "
                 f"{question_id} "
                 f"already evaluated. "
                 f"Skipping."
             )
+
             continue
 
         print("\n" + "=" * 80)
 
         print(
-            f"[{index}/{len(results)}] " f"{question_id} | " f"Evidence-K={evidence_k}"
+            f"[{index}/{total_answers}] " f"{question_id} | " f"{item['question_type']}"
         )
 
         print("=" * 80)
 
-        document_metrics = evaluator.document_metrics(
-            document_ids=item.get(
-                "document_ids",
-                [],
-            ),
-            expected_doc_ids=item.get(
-                "expected_doc_ids",
-                [],
-            ),
+        question = item["question"]
+
+        system_answer = item["answer"]
+
+        gold_answer = item.get(
+            "gold_answer",
+            "",
         )
+
+        answer_facts = item.get(
+            "answer_facts",
+            [],
+        )
+
+        retrieved_doc_ids = item.get(
+            "document_ids",
+            [],
+        )
+
+        expected_doc_ids = item.get(
+            "expected_doc_ids",
+            [],
+        )
+
+        (
+            document_recall,
+            extra_documents,
+        ) = calculate_document_metrics(
+            retrieved_doc_ids=(retrieved_doc_ids),
+            expected_doc_ids=(expected_doc_ids),
+        )
+
+        start_time = time.time()
 
         try:
             judge_result = evaluator.judge_answer(
-                question=item["question"],
-                answer=item["answer"],
-                gold_answer=item["gold_answer"],
-                answer_facts=item["answer_facts"],
+                question=question,
+                system_answer=(system_answer),
+                gold_answer=(gold_answer),
+                answer_facts=(answer_facts),
             )
 
+            judge_latency = time.time() - start_time
+
+            correctness_score = float(
+                judge_result.get(
+                    "correctness_score",
+                    0.0,
+                )
+            )
+
+            correctness_score = max(
+                0.0,
+                min(
+                    1.0,
+                    correctness_score,
+                ),
+            )
+
+            fact_coverage = judge_result.get(
+                "fact_coverage",
+                [],
+            )
+
+            completeness = calculate_completeness(
+                answer_facts=(answer_facts),
+                fact_coverage=(fact_coverage),
+            )
+
+            result = {
+                "question_id": (question_id),
+                "question_type": (item["question_type"]),
+                "question": (question),
+                "answer": (system_answer),
+                "gold_answer": (gold_answer),
+                "answer_facts": (answer_facts),
+                "correctness_score": (correctness_score),
+                "completeness": (completeness),
+                "document_recall": (document_recall),
+                "invalid_extra_documents": (extra_documents),
+                "retrieved_document_ids": (retrieved_doc_ids),
+                "expected_doc_ids": (expected_doc_ids),
+                "fact_coverage": (fact_coverage),
+                "judge_reasoning": (
+                    judge_result.get(
+                        "reasoning",
+                        "",
+                    )
+                ),
+                "generation_latency_seconds": (item.get("latency_seconds")),
+                "judge_latency_seconds": (judge_latency),
+            }
+
+            save_result(
+                OUTPUT_FILE,
+                result,
+            )
+
+            completed_ids.add(question_id)
+
+            print(f"Correctness: " f"{correctness_score:.4f}")
+
+            print(f"Completeness: " f"{completeness:.4f}")
+
+            print(f"Document Recall: " f"{document_recall:.4f}")
+
+            print(f"Extra Documents: " f"{len(extra_documents)}")
+
+            print(f"Judge latency: " f"{judge_latency:.2f}s")
+
+            print("Saved successfully.")
+
         except Exception as error:
-            print(f"\nJudge failed for " f"{question_id}.")
+            failed_count += 1
+
+            print(f"\nERROR evaluating " f"{question_id}")
+
+            print(f"Error type: " f"{type(error).__name__}")
 
             print(f"Error: {error}")
 
@@ -397,169 +514,28 @@ def evaluate_one_k(
 
             continue
 
-        correctness_score = float(
-            judge_result.get(
-                "correctness_score",
-                0.0,
-            )
-        )
-
-        fact_results = judge_result.get(
-            "fact_results",
-            [],
-        )
-
-        completeness_score = calculate_completeness(fact_results)
-
-        evaluation_result = {
-            "question_id": (question_id),
-            "question_type": item.get("question_type"),
-            "evidence_k": evidence_k,
-            "correctness_score": (correctness_score),
-            "completeness_score": (completeness_score),
-            "document_recall": (document_metrics["document_recall"]),
-            "invalid_extra_count": (document_metrics["invalid_extra_count"]),
-            "invalid_extra_documents": (document_metrics["invalid_extra_documents"]),
-            "fact_results": (fact_results),
-            "judge_reason": (
-                judge_result.get(
-                    "reason",
-                    "",
-                )
-            ),
-            "latency_seconds": item.get(
-                "latency_seconds",
-                0.0,
-            ),
-        }
-
-        save_result(
-            output_file,
-            evaluation_result,
-        )
-
-        completed_ids.add(question_id)
-
-        print(f"\nCorrectness: " f"{correctness_score:.4f}")
-
-        print(f"Completeness: " f"{completeness_score:.4f}")
-
-        print(f"Document Recall: " f"{document_metrics['document_recall']:.4f}")
-
-        print(f"Invalid Extra Docs: " f"{document_metrics['invalid_extra_count']}")
-
-        print("Reason:")
-
-        print(judge_result.get("reason", ""))
-
-        print("Saved successfully.")
-
-    return output_file
-
-
-def calculate_summary(
-    file_path,
-):
-    if not os.path.exists(file_path):
-        return None
-
-    results = load_results(file_path)
-
-    if not results:
-        return None
-
-    count = len(results)
-
-    avg_correctness = sum(item["correctness_score"] for item in results) / count
-
-    avg_completeness = sum(item["completeness_score"] for item in results) / count
-
-    avg_document_recall = sum(item["document_recall"] for item in results) / count
-
-    avg_invalid_extra = sum(item["invalid_extra_count"] for item in results) / count
-
-    avg_latency = (
-        sum(
-            item.get(
-                "latency_seconds",
-                0.0,
-            )
-            for item in results
-        )
-        / count
-    )
-
-    return {
-        "count": count,
-        "correctness": avg_correctness,
-        "completeness": avg_completeness,
-        "document_recall": (avg_document_recall),
-        "invalid_extra": (avg_invalid_extra),
-        "latency": avg_latency,
-    }
-
-
-def print_comparison(
-    summaries,
-):
-    print("\n" + "#" * 80)
-    print("EVIDENCE-K ABLATION COMPARISON")
-    print("#" * 80)
-
-    header = (
-        f"{'K':<6}"
-        f"{'N':<6}"
-        f"{'Correct':<12}"
-        f"{'Complete':<12}"
-        f"{'DocRecall':<12}"
-        f"{'ExtraDocs':<12}"
-        f"{'Latency':<12}"
-    )
-
-    print(header)
-    print("-" * 72)
-
-    for evidence_k in EVIDENCE_K_VALUES:
-        summary = summaries.get(evidence_k)
-
-        if summary is None:
-            continue
-
-        print(
-            f"{evidence_k:<6}"
-            f"{summary['count']:<6}"
-            f"{summary['correctness']:<12.4f}"
-            f"{summary['completeness']:<12.4f}"
-            f"{summary['document_recall']:<12.4f}"
-            f"{summary['invalid_extra']:<12.2f}"
-            f"{summary['latency']:<12.2f}"
-        )
-
-
-def main():
-    print("Loading Answer Evaluator...")
-
-    evaluator = AnswerEvaluator()
-
-    summaries = {}
-
-    for evidence_k in EVIDENCE_K_VALUES:
-        output_file = evaluate_one_k(
-            evaluator=evaluator,
-            evidence_k=evidence_k,
-        )
-
-        summary = calculate_summary(output_file)
-
-        summaries[evidence_k] = summary
-
-    print_comparison(summaries)
+    all_results = load_jsonl(OUTPUT_FILE)
 
     print("\n" + "#" * 80)
 
-    print("EVIDENCE-K ABLATION " "EVALUATION COMPLETE")
+    print("FULL ADVANCED RAG " "ANSWER EVALUATION COMPLETE")
 
     print("#" * 80)
+
+    print(f"Total answers: " f"{total_answers}")
+
+    print(f"Evaluated: " f"{len(completed_ids)}")
+
+    print(f"Failed this run: " f"{failed_count}")
+
+    print(f"Output file: " f"{OUTPUT_FILE}")
+
+    print_summary(all_results)
+
+    if len(completed_ids) < total_answers:
+        print("\nSome questions are " "still incomplete.")
+
+        print("Run this script again " "to resume them.")
 
 
 if __name__ == "__main__":

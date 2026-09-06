@@ -4,18 +4,21 @@ import time
 
 from advanced_rag import AdvancedRAG
 
-EVAL_FILE = "data/evaluation/v0_questions.jsonl"
+EVAL_FILE = "data/evaluation/" "v0_questions.jsonl"
 
-# Evidence-K values for controlled ablation.
-EVIDENCE_K_VALUES = [5, 10, 20]
+OUTPUT_FILE = "data/evaluation/" "advanced_rag_answers_full.jsonl"
 
-# Only use the first 3 questions for the ablation smoke test.
-SMOKE_TEST_SIZE = 3
+# Final Evidence-K selected from
+# the smoke-test ablation.
+EVIDENCE_TOP_K = 5
 
 
-def load_questions(file_path):
+def load_questions(
+    file_path,
+):
     """
-    Load evaluation questions from JSONL.
+    Load all evaluation questions
+    from JSONL.
     """
 
     questions = []
@@ -78,7 +81,7 @@ def extract_evidence(
     reranked_candidates,
 ):
     """
-    Convert reranked chunks into
+    Convert final reranked chunks into
     JSON-serializable evidence records.
     """
 
@@ -121,6 +124,7 @@ def extract_document_ids(
             continue
 
         seen_doc_ids.add(doc_id)
+
         document_ids.append(doc_id)
 
     return document_ids
@@ -131,7 +135,8 @@ def save_result(
     result,
 ):
     """
-    Append one result immediately.
+    Save each completed question
+    immediately.
     """
 
     output_directory = os.path.dirname(output_file)
@@ -155,29 +160,37 @@ def save_result(
             + "\n"
         )
 
+        # Force the result to disk
+        # immediately.
+        f.flush()
 
-def run_evidence_k(
-    rag,
-    questions,
-    evidence_k,
-):
-    """
-    Run one Evidence-K configuration.
-    """
 
-    output_file = "data/evaluation/" f"advanced_rag_answers_k{evidence_k}.jsonl"
+def main():
+    print("Loading evaluation questions...")
 
-    completed_ids = load_completed_question_ids(output_file)
+    questions = load_questions(EVAL_FILE)
 
-    print("\n" + "#" * 80)
-    print(f"EVIDENCE-K = {evidence_k}")
-    print("#" * 80)
+    print(f"Loaded {len(questions)} " f"questions.")
 
-    print(f"Output file: {output_file}")
+    completed_ids = load_completed_question_ids(OUTPUT_FILE)
 
     print(f"Already completed: " f"{len(completed_ids)}")
 
+    print(f"Remaining: " f"{len(questions) - len(completed_ids)}")
+
+    print(f"Evidence-K: " f"{EVIDENCE_TOP_K}")
+
+    print(f"Output file: " f"{OUTPUT_FILE}")
+
+    print("\nLoading Advanced RAG...")
+
+    rag = AdvancedRAG()
+
     total_questions = len(questions)
+
+    successful_count = len(completed_ids)
+
+    failed_count = 0
 
     for index, item in enumerate(
         questions,
@@ -189,25 +202,23 @@ def run_evidence_k(
             print(
                 f"\n[{index}/{total_questions}] "
                 f"{question_id} "
-                f"already completed. Skipping."
+                f"already completed. "
+                f"Skipping."
             )
+
             continue
 
         question = item["question"]
+
         question_type = item["question_type"]
 
         print("\n" + "=" * 80)
 
-        print(
-            f"[{index}/{total_questions}] "
-            f"{question_id} | "
-            f"{question_type} | "
-            f"Evidence-K={evidence_k}"
-        )
+        print(f"[{index}/{total_questions}] " f"{question_id} | " f"{question_type}")
 
         print("=" * 80)
 
-        print(f"Question: {question}")
+        print(f"Question: " f"{question}")
 
         start_time = time.time()
 
@@ -215,7 +226,7 @@ def run_evidence_k(
             rag_result = rag.answer(
                 query=question,
                 question_type=question_type,
-                evidence_top_k=evidence_k,
+                evidence_top_k=(EVIDENCE_TOP_K),
             )
 
             elapsed_seconds = time.time() - start_time
@@ -230,7 +241,7 @@ def run_evidence_k(
                 "question_id": (question_id),
                 "question_type": (question_type),
                 "question": (question),
-                "evidence_k": (evidence_k),
+                "evidence_k": (EVIDENCE_TOP_K),
                 "answer": (rag_result["answer"]),
                 "document_ids": (document_ids),
                 "expected_doc_ids": (
@@ -256,15 +267,17 @@ def run_evidence_k(
             }
 
             save_result(
-                output_file,
+                OUTPUT_FILE,
                 result,
             )
 
             completed_ids.add(question_id)
 
-            print(f"\nGenerated answer in " f"{elapsed_seconds:.2f}s")
+            successful_count += 1
 
-            print("Final evidence documents: " f"{document_ids}")
+            print(f"\nCompleted in " f"{elapsed_seconds:.2f}s.")
+
+            print(f"Evidence documents: " f"{document_ids}")
 
             print("\nAnswer:")
 
@@ -273,35 +286,42 @@ def run_evidence_k(
             print("\nSaved successfully.")
 
         except Exception as error:
-            print(f"\nERROR on " f"{question_id}: " f"{error}")
+            failed_count += 1
 
-            print("This question was not saved " "and can be retried later.")
+            elapsed_seconds = time.time() - start_time
 
+            print(f"\nERROR on " f"{question_id}")
 
-def main():
-    print("Loading evaluation questions...")
+            print(f"Error type: " f"{type(error).__name__}")
 
-    questions = load_questions(EVAL_FILE)
+            print(f"Error: {error}")
 
-    # Controlled ablation on the same 3 questions.
-    questions = questions[:SMOKE_TEST_SIZE]
+            print(f"Failed after " f"{elapsed_seconds:.2f}s.")
 
-    print(f"Loaded {len(questions)} " f"questions for Evidence-K ablation.")
+            print(
+                "This question was not " "saved and can be retried " "on the next run."
+            )
 
-    print("\nLoading Advanced RAG once...")
-
-    rag = AdvancedRAG()
-
-    for evidence_k in EVIDENCE_K_VALUES:
-        run_evidence_k(
-            rag=rag,
-            questions=questions,
-            evidence_k=evidence_k,
-        )
+            continue
 
     print("\n" + "#" * 80)
-    print("EVIDENCE-K ABLATION GENERATION COMPLETE")
+
+    print("FULL ADVANCED RAG " "GENERATION COMPLETE")
+
     print("#" * 80)
+
+    print(f"Total questions: " f"{total_questions}")
+
+    print(f"Completed: " f"{len(completed_ids)}")
+
+    print(f"Failed this run: " f"{failed_count}")
+
+    print(f"Output file: " f"{OUTPUT_FILE}")
+
+    if len(completed_ids) < total_questions:
+        print("\nSome questions are " "still incomplete.")
+
+        print("Run this script again " "to resume them.")
 
 
 if __name__ == "__main__":
