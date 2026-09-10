@@ -377,6 +377,7 @@ Return ONLY valid JSON:
                     time.sleep(DECISION_RETRY_WAIT_SECONDS)
 
         print("Decision LLM failed after " "all attempts.")
+
         print("Falling back to global_search.")
 
         return Decision(
@@ -461,6 +462,7 @@ Return ONLY valid JSON:
         window_size = EVIDENCE_PREVIEW_LEFT_CHARS + EVIDENCE_PREVIEW_RIGHT_CHARS
 
         best_start_position = matches[0][0]
+
         best_terms = set()
         best_count = -1
 
@@ -514,6 +516,7 @@ Return ONLY valid JSON:
             start=1,
         ):
             chunk = candidate.get("chunk")
+
             document_id = candidate.get("doc_id")
 
             if chunk is None:
@@ -775,6 +778,7 @@ Return ONLY valid JSON:
 
         if sufficient:
             action = AgentAction.GENERATE
+
             missing_information = ""
 
         elif action == AgentAction.GENERATE:
@@ -789,6 +793,7 @@ Return ONLY valid JSON:
         }:
             if document_id not in available_document_ids:
                 action = AgentAction.GLOBAL_SEARCH
+
                 document_id = None
                 chunk_index = None
 
