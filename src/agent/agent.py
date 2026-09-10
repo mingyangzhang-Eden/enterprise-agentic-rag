@@ -453,7 +453,7 @@ class RetrievalAgent:
     ) -> None:
         print()
         print("=" * 80)
-        print("V3.3-FINAL RECOVERY-AWARE " "EVIDENCE STATE")
+        print("V3.2 RECOVERY-AWARE " "EVIDENCE STATE")
         print("=" * 80)
 
         print("Recovery document: " f"{recovery_document_id}")
